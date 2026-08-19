@@ -1,0 +1,7 @@
+node_modules/
+.env
+.env.leaked-backup
+packages/api/.env
+dist/
+.next/
+*.log

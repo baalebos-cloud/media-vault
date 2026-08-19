@@ -1,0 +1,156 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+enum FileStatus {
+  PENDING      // presigned URL issued, upload not confirmed
+  UPLOADED     // raw object confirmed in storage
+  PROCESSING   // worker generating thumbnails / HLS
+  READY        // fully processed, safe to stream
+  FAILED
+}
+
+enum FileKind {
+  IMAGE
+  VIDEO
+  DOCUMENT
+  OTHER
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String
+  role         Role     @default(MEMBER)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  emailVerified        Boolean   @default(false)
+  verificationToken    String?   @unique
+  verificationExpires  DateTime?
+
+  resetToken        String?   @unique
+  resetTokenExpires DateTime?
+
+  folders Folder[]
+  files   File[]
+  shares  Share[]  @relation("SharesCreatedBy")
+
+  @@map("users")
+}
+
+model Folder {
+  id        String   @id @default(uuid())
+  name      String
+  parentId  String?
+  parent    Folder?  @relation("FolderTree", fields: [parentId], references: [id], onDelete: Cascade)
+  children  Folder[] @relation("FolderTree")
+
+  ownerId   String
+  owner     User     @relation(fields: [ownerId], references: [id])
+
+  files     File[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([ownerId, parentId])
+  @@map("folders")
+}
+
+model File {
+  id           String     @id @default(uuid())
+  ownerId      String
+  owner        User       @relation(fields: [ownerId], references: [id])
+
+  folderId     String?
+  folder       Folder?    @relation(fields: [folderId], references: [id], onDelete: SetNull)
+
+  // storage location
+  bucket       String
+  objectKey    String     @unique
+  originalName String
+  mimeType     String
+  kind         FileKind
+  sizeBytes    BigInt
+  checksum     String?
+
+  status       FileStatus @default(PENDING)
+
+  // derived / processed assets
+  thumbnailKey String?
+  hlsManifestKey String?  // for VIDEO: path to master.m3u8
+
+  metadata     FileMetadata?
+  tags         Tag[]      @relation("FileTags")
+  shares       Share[]
+
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  @@index([ownerId, folderId])
+  @@index([kind, status])
+  @@map("files")
+}
+
+// EXIF / video technical metadata, split out so File stays lean
+model FileMetadata {
+  id          String   @id @default(uuid())
+  fileId      String   @unique
+  file        File     @relation(fields: [fileId], references: [id], onDelete: Cascade)
+
+  width         Int?
+  height        Int?
+  durationSec   Float?     // video/audio
+  cameraMake    String?
+  cameraModel   String?
+  takenAt       DateTime?  // EXIF DateTimeOriginal
+  gpsLat        Float?
+  gpsLng        Float?
+  videoCodec    String?
+  videoBitrate  Int?
+
+  raw           Json?      // full EXIF/ffprobe dump for anything not modeled above
+
+  @@map("file_metadata")
+}
+
+model Tag {
+  id    String @id @default(uuid())
+  name  String @unique
+  files File[] @relation("FileTags")
+
+  @@map("tags")
+}
+
+model Share {
+  id          String    @id @default(uuid())
+  fileId      String
+  file        File      @relation(fields: [fileId], references: [id], onDelete: Cascade)
+
+  createdById String
+  createdBy   User      @relation("SharesCreatedBy", fields: [createdById], references: [id])
+
+  token       String    @unique @default(uuid())
+  expiresAt   DateTime?
+  maxViews    Int?
+  viewCount   Int       @default(0)
+  passwordHash String?
+
+  createdAt   DateTime  @default(now())
+
+  @@index([token])
+  @@map("shares")
+}
