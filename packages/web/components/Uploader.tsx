@@ -16,7 +16,15 @@ type UploadItem = {
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
 
-export default function Uploader({ token, folderId }: { token: string; folderId?: string }) {
+export default function Uploader({
+  token,
+  folderId,
+  onFileReady,
+}: {
+  token: string;
+  folderId?: string;
+  onFileReady?: () => void;
+}) {
   const [items, setItems] = useState<UploadItem[]>([]);
 
   const patch = (id: string, changes: Partial<UploadItem>) =>
@@ -39,8 +47,10 @@ export default function Uploader({ token, folderId }: { token: string; folderId?
           });
           if (!res.ok) return setTimeout(check, 2000);
           const data = await res.json();
-          if (data.status === "READY") patch(itemId, { status: "ready" });
-          else if (data.status === "FAILED") patch(itemId, { status: "error" });
+          if (data.status === "READY") {
+            patch(itemId, { status: "ready" });
+            onFileReady?.();
+          } else if (data.status === "FAILED") patch(itemId, { status: "error" });
           else setTimeout(check, 2000);
         } catch {
           setTimeout(check, 2000);
@@ -48,7 +58,7 @@ export default function Uploader({ token, folderId }: { token: string; folderId?
       };
       check();
     },
-    [token]
+    [token, onFileReady]
   );
 
   const uploadFile = useCallback(

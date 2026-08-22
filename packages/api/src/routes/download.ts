@@ -6,6 +6,24 @@ import { requireAuth, type AuthedRequest } from "../middleware/auth.js";
 export const downloadRouter = Router();
 downloadRouter.use(requireAuth);
 
+downloadRouter.get("/", async (req: AuthedRequest, res) => {
+  const files = await prisma.file.findMany({
+    where: { ownerId: req.userId },
+    orderBy: { createdAt: "desc" },
+    take: 200,
+  });
+  res.json({
+    files: files.map((f) => ({
+      id: f.id,
+      name: f.originalName,
+      kind: f.kind,
+      status: f.status,
+      sizeBytes: f.sizeBytes.toString(),
+      createdAt: f.createdAt,
+    })),
+  });
+});
+
 // Registered BEFORE /:fileId — Express matches routes in registration
 // order, and if this sat below the param route, "/by-key/<key>" would be
 // swallowed by "/:fileId" (treating the literal "by-key" as a file ID),

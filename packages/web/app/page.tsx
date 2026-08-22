@@ -5,21 +5,20 @@ import { useRouter } from "next/navigation";
 import { useAuth } from "../hooks/useAuth";
 import { resendVerification } from "../lib/auth";
 import Uploader from "../components/Uploader";
+import FileList from "../components/FileList";
 
 export default function HomePage() {
   const router = useRouter();
   const { user, loading, token, logout } = useAuth();
   const [resendStatus, setResendStatus] = useState<"idle" | "sending" | "sent" | "error">("idle");
+  const [refreshKey, setRefreshKey] = useState(0);
 
-  // Redirect unauthenticated visitors to /login once we've finished
-  // checking for a valid session (not before — that would flash a redirect
-  // on every load even for logged-in users).
   useEffect(() => {
     if (!loading && !user) router.push("/login");
   }, [loading, user, router]);
 
   if (loading) return <main style={{ padding: 24 }}>Loading…</main>;
-  if (!user || !token) return null; // redirect already in flight
+  if (!user || !token) return null;
 
   const onResend = async () => {
     setResendStatus("sending");
@@ -42,14 +41,7 @@ export default function HomePage() {
               logout();
               router.push("/login");
             }}
-            style={{
-              background: "none",
-              border: "1px solid #333",
-              color: "#eee",
-              borderRadius: 4,
-              padding: "4px 8px",
-              cursor: "pointer",
-            }}
+            style={{ background: "none", border: "1px solid #333", color: "#eee", borderRadius: 4, padding: "4px 8px", cursor: "pointer" }}
           >
             Log out
           </button>
@@ -85,7 +77,8 @@ export default function HomePage() {
         </div>
       )}
 
-      <Uploader token={token} />
+      <Uploader token={token} onFileReady={() => setRefreshKey((k) => k + 1)} />
+      <FileList token={token} refreshKey={refreshKey} />
     </main>
   );
 }
