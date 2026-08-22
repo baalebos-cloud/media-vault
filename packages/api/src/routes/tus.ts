@@ -1,6 +1,5 @@
 import { Server } from "@tus/server";
 import { S3Store } from "@tus/s3-store";
-import { randomUUID } from "crypto";
 import { prisma } from "../lib/prisma.js";
 import { verifyBearer } from "../lib/jwt.js";
 import { mediaQueue } from "../worker/queue.js";
@@ -44,8 +43,14 @@ export const tusServer = new Server({
     const mimeType = meta.filetype ?? "application/octet-stream";
     const folderId = meta.folderId;
 
-    const objectKey = `raw/${userId}/${randomUUID()}-${originalName}`;
-    upload.id = objectKey;
+    // IMPORTANT: do not override upload.id with a custom multi-segment path
+    // (e.g. "raw/<userId>/<uuid>-name"). @tus/server builds the Location
+    // header from this ID and later re-derives the same ID from each PATCH
+    // request's URL to look the upload back up in the store — a slash-
+    // containing ID breaks that round-trip, so every chunk PATCH 404s even
+    // though creation succeeds. Let tus assign its own flat, opaque ID and
+    // use that directly as the S3 object key.
+    const objectKey = upload.id;
 
     await prisma.file.create({
       data: {

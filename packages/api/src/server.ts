@@ -9,6 +9,12 @@ import { tusServer } from "./routes/tus.js";
 const app = express();
 app.use(helmet());
 
+process.on("unhandledRejection", (reason) => {
+  console.error("UNHANDLED REJECTION:", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("UNCAUGHT EXCEPTION:", err);
+});
 // Browser requests from the web frontend (a different origin — different
 // port counts as a different origin) are blocked by default unless the API
 // explicitly allows it. FRONTEND_URL supports a comma-separated list so both
@@ -57,7 +63,7 @@ app.use("/api/files", downloadRouter);
 // tus resumable-upload protocol: POST creates, PATCH streams chunks, HEAD
 // reports offset for resuming, DELETE cancels. tusServer owns the full
 // request/response lifecycle for this path.
-app.all("/api/tus/*", (req, res) => tusServer.handle(req, res));
+app.all(["/api/tus", "/api/tus/*"], (req, res) => tusServer.handle(req, res));
 
 const port = process.env.PORT ? Number(process.env.PORT) : 4000;
 app.listen(port, () => console.log(`Vault API listening on :${port}`));

@@ -11,8 +11,8 @@ uploadRouter.use(requireAuth);
 
 const initiateSchema = z.object({
   originalName: z.string().min(1).max(512),
-  mimeType: z.string().min(1),
-  sizeBytes: z.number().int().positive(),
+  mimeType: z.string().min(1).max(255),
+  sizeBytes: z.number().int().positive().max(5_000_000_000_000),
   folderId: z.string().uuid().optional(),
 });
 
@@ -23,65 +23,83 @@ function kindFromMime(mime: string): "IMAGE" | "VIDEO" | "DOCUMENT" | "OTHER" {
   return "OTHER";
 }
 
-/**
- * Step 1: client asks for a place to upload.
- * Server creates a PENDING File row + returns a presigned PUT URL.
- * The actual bytes never touch this API process.
- */
+function sanitizeFilename(name: string): string {
+  return name.replace(/[/\\]/g, "_").replace(/[\x00-\x1f]/g, "").slice(0, 512);
+}
+
 uploadRouter.post("/initiate", async (req: AuthedRequest, res) => {
   const parsed = initiateSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
-  const { originalName, mimeType, sizeBytes, folderId } = parsed.data;
-  const objectKey = `raw/${req.userId}/${randomUUID()}-${originalName}`;
+  const { mimeType, sizeBytes, folderId } = parsed.data;
+  const originalName = sanitizeFilename(parsed.data.originalName);
 
-  const file = await prisma.file.create({
-    data: {
-      ownerId: req.userId!,
-      folderId,
-      bucket: BUCKET,
-      objectKey,
-      originalName,
-      mimeType,
-      kind: kindFromMime(mimeType),
-      sizeBytes,
-      status: "PENDING",
-    },
-  });
+  try {
+    if (folderId) {
+      const folder = await prisma.folder.findFirst({
+        where: { id: folderId, ownerId: req.userId },
+      });
+      if (!folder) {
+        return res.status(403).json({ error: "Folder not found or not owned by this user" });
+      }
+    }
 
-  const uploadUrl = await presignUpload(objectKey, mimeType);
+    const objectKey = `raw/${req.userId}/${randomUUID()}-${originalName}`;
 
-  res.status(201).json({ fileId: file.id, uploadUrl, objectKey, expiresInSec: 900 });
+    const file = await prisma.file.create({
+      data: {
+        ownerId: req.userId!,
+        folderId,
+        bucket: BUCKET,
+        objectKey,
+        originalName,
+        mimeType,
+        kind: kindFromMime(mimeType),
+        sizeBytes,
+        status: "PENDING",
+      },
+    });
+
+    const uploadUrl = await presignUpload(objectKey, mimeType);
+
+    res.status(201).json({ fileId: file.id, uploadUrl, objectKey, expiresInSec: 900 });
+  } catch (err) {
+    console.error("upload/initiate failed:", err);
+    res.status(500).json({ error: "Failed to initiate upload" });
+  }
 });
 
-/**
- * Step 2: client confirms the PUT succeeded.
- * Server verifies the object actually exists (never trust the client),
- * flips status to UPLOADED, and enqueues async processing.
- */
 uploadRouter.post("/:fileId/confirm", async (req: AuthedRequest, res) => {
-  const file = await prisma.file.findFirst({
-    where: { id: req.params.fileId, ownerId: req.userId },
-  });
-  if (!file) return res.status(404).json({ error: "File not found" });
+  try {
+    const file = await prisma.file.findFirst({
+      where: { id: req.params.fileId, ownerId: req.userId },
+    });
+    if (!file) return res.status(404).json({ error: "File not found" });
 
-  const { exists, size } = await objectExists(file.objectKey);
-  if (!exists) {
-    return res.status(409).json({ error: "Object not found in storage yet" });
+    const { exists, size } = await objectExists(file.objectKey);
+    if (!exists) {
+      return res.status(409).json({ error: "Object not found in storage yet" });
+    }
+
+    // Checked directly here (not via a separate boolean) so TypeScript can
+    // narrow file.kind to "IMAGE" | "VIDEO" at the mediaQueue.add call below —
+    // narrowing through an indirect boolean doesn't propagate to later reads.
+    if (file.kind === "IMAGE" || file.kind === "VIDEO") {
+      await prisma.file.update({
+        where: { id: file.id },
+        data: { sizeBytes: size ?? file.sizeBytes, status: "PROCESSING" },
+      });
+      await mediaQueue.add("process-media", { fileId: file.id, kind: file.kind });
+    } else {
+      await prisma.file.update({
+        where: { id: file.id },
+        data: { sizeBytes: size ?? file.sizeBytes, status: "READY" },
+      });
+    }
+
+    res.json({ status: "ok" });
+  } catch (err) {
+    console.error("upload/confirm failed:", err);
+    res.status(500).json({ error: "Failed to confirm upload" });
   }
-
-  await prisma.file.update({
-    where: { id: file.id },
-    data: { status: "UPLOADED", sizeBytes: size ?? file.sizeBytes },
-  });
-
-  // Only image/video need the async pipeline; documents go straight to READY.
-  if (file.kind === "IMAGE" || file.kind === "VIDEO") {
-    await mediaQueue.add("process-media", { fileId: file.id, kind: file.kind });
-    await prisma.file.update({ where: { id: file.id }, data: { status: "PROCESSING" } });
-  } else {
-    await prisma.file.update({ where: { id: file.id }, data: { status: "READY" } });
-  }
-
-  res.json({ status: "ok" });
 });

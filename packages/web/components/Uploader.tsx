@@ -8,7 +8,7 @@ type UploadStatus = "uploading" | "paused" | "processing" | "ready" | "error";
 type UploadItem = {
   id: string;
   file: File;
-  progress: number; // 0-100
+  progress: number;
   status: UploadStatus;
   previewUrl?: string;
   upload: tus.Upload;
@@ -22,6 +22,35 @@ export default function Uploader({ token, folderId }: { token: string; folderId?
   const patch = (id: string, changes: Partial<UploadItem>) =>
     setItems((prev) => prev.map((i) => (i.id === id ? { ...i, ...changes } : i)));
 
+  const pollFileStatus = useCallback(
+    (itemId: string, objectKey: string) => {
+      let attempts = 0;
+      const maxAttempts = 30;
+
+      const check = async () => {
+        attempts++;
+        if (attempts > maxAttempts) {
+          patch(itemId, { status: "error" });
+          return;
+        }
+        try {
+          const res = await fetch(`${API_URL}/api/files/by-key/${encodeURIComponent(objectKey)}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (!res.ok) return setTimeout(check, 2000);
+          const data = await res.json();
+          if (data.status === "READY") patch(itemId, { status: "ready" });
+          else if (data.status === "FAILED") patch(itemId, { status: "error" });
+          else setTimeout(check, 2000);
+        } catch {
+          setTimeout(check, 2000);
+        }
+      };
+      check();
+    },
+    [token]
+  );
+
   const uploadFile = useCallback(
     (file: File) => {
       const localId = crypto.randomUUID();
@@ -29,13 +58,10 @@ export default function Uploader({ token, folderId }: { token: string; folderId?
 
       const upload = new tus.Upload(file, {
         endpoint: `${API_URL}/api/tus`,
-        // Fingerprints the file (name/size/type/lastModified) so re-selecting
-        // the same file after a page reload or crash resumes instead of
-        // restarting from byte 0.
         storeFingerprintForResuming: true,
         removeFingerprintOnSuccess: true,
         retryDelays: [0, 1000, 3000, 5000, 10000],
-        chunkSize: 8 * 1024 * 1024, // must match the S3Store partSize on the server
+        chunkSize: 8 * 1024 * 1024,
         headers: { Authorization: `Bearer ${token}` },
         metadata: {
           filename: file.name,
@@ -47,9 +73,9 @@ export default function Uploader({ token, folderId }: { token: string; folderId?
           patch(localId, { progress: Math.round((bytesSent / bytesTotal) * 100) });
         },
         onSuccess: () => {
-          // The server already enqueued processing inside onUploadFinish by
-          // the time this fires, so the file is PROCESSING or READY.
           patch(localId, { status: "processing" });
+          const objectKey = upload.url?.split("/").pop();
+          if (objectKey) pollFileStatus(localId, objectKey);
         },
       });
 
@@ -58,14 +84,12 @@ export default function Uploader({ token, folderId }: { token: string; folderId?
         { id: localId, file, progress: 0, status: "uploading", previewUrl, upload },
       ]);
 
-      // If an incomplete upload for this exact file already exists (tab was
-      // closed, network dropped), resume it instead of starting over.
       upload.findPreviousUploads().then((previous) => {
         if (previous.length) upload.resumeFromPreviousUpload(previous[0]);
         upload.start();
       });
     },
-    [token, folderId]
+    [token, folderId, pollFileStatus]
   );
 
   const pause = (id: string) => {
